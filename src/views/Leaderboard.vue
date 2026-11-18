@@ -1,7 +1,8 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue'
 import { rpc } from '../lib/supabase'
-import { fmtDuration, fmtDate, medals } from '../lib/format'
+import { loadActiveWeek } from '../store'
+import { fmtDuration, fmtDate, medals, weekPhase } from '../lib/format'
 import Podium from '../components/Podium.vue'
 
 const weeks = ref([])
@@ -30,10 +31,12 @@ async function loadRows() {
 }
 
 onMounted(async () => {
+  loadActiveWeek() // để áp ảnh nền của tuần đang mở
   try {
     weeks.value = await rpc('list_weeks')
     winners.value = await rpc('weekly_winners')
-    weekId.value = (weeks.value.find((w) => w.is_active) || weeks.value[0])?.id || ''
+    const open = weeks.value.find((w) => weekPhase(w) === 'open')
+    weekId.value = (open || weeks.value[0])?.id || ''
     await loadRows()
   } catch (e) { error.value = e.message }
   loading.value = false
@@ -59,7 +62,7 @@ watch(weekId, loadRows)
           <label>Chọn tuần</label>
           <select v-model="weekId">
             <option v-for="w in weeks" :key="w.id" :value="w.id">
-              {{ w.emoji }} {{ w.title }}{{ w.is_active ? ' (đang mở)' : '' }}
+              {{ w.emoji }} {{ w.title }}{{ weekPhase(w) === 'open' ? ' (đang mở)' : '' }}
             </option>
           </select>
         </div>
@@ -96,7 +99,7 @@ watch(weekId, loadRows)
       <p v-if="!hall.length" class="card muted">Chưa có dữ liệu.</p>
       <div v-for="h in hall" :key="h.week_id" class="card">
         <h2>{{ h.emoji }} {{ h.title }}</h2>
-        <p class="muted small" v-if="h.theme || h.week_start">{{ h.theme }} {{ h.week_start ? '· ' + fmtDate(h.week_start) : '' }}</p>
+        <p class="muted small" v-if="h.theme || h.start_at">{{ h.theme }} {{ h.start_at ? '· ' + fmtDate(h.start_at) : '' }}</p>
         <Podium :rows="h.list" />
       </div>
     </template>

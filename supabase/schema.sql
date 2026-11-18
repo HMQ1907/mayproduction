@@ -40,8 +40,13 @@ create table if not exists public.weeks (
   boom_msg      text not null default 'BOOM! Bạn bị trừ điểm 💣',
   created_at    timestamptz not null default now()
 );
--- chỉ 1 tuần được "đang mở" tại một thời điểm
-create unique index if not exists weeks_one_active on public.weeks (is_active) where is_active;
+-- ảnh nền khi chơi (template 1080x1920, lưu dạng data URL JPEG)
+alter table public.weeks add column if not exists bg_image text;
+-- khung giờ chơi (có giờ phút). is_active = "đã công khai"; chơi được khi nằm trong khung giờ
+alter table public.weeks add column if not exists start_at timestamptz;
+alter table public.weeks add column if not exists end_at   timestamptz;
+update public.weeks set start_at = week_start::timestamptz where start_at is null and week_start is not null;
+drop index if exists public.weeks_one_active;
 
 create table if not exists public.questions (
   id         uuid primary key default gen_random_uuid(),
@@ -116,14 +121,26 @@ revoke all on function public.session_view(uuid) from public, anon, authenticate
 
 -- ---------- RPC cho người chơi -------------------------------------
 
--- Tuần đang mở (công khai, chỉ thông tin hiển thị)
+-- Tuần hiện hành cho người chơi: ưu tiên tuần đang trong khung giờ, rồi tuần sắp tới gần nhất, rồi tuần vừa kết thúc.
+-- phase: open | upcoming | ended. server_now để client tính đếm ngược đúng giờ server.
 create or replace function public.get_active_week() returns jsonb
 language sql stable security definer set search_path = public as $$
   select to_jsonb(x) from (
-    select w.id, w.title, w.theme, w.emoji, w.color, w.week_start, w.q_count, w.bonus_count, w.boom_count,
+    select w.id, w.title, w.theme, w.emoji, w.color, w.bg_image, w.start_at, w.end_at,
+           w.q_count, w.bonus_count, w.boom_count,
            w.turns, w.points, w.mcq_seconds, w.text_seconds, w.bonus_msg, w.boom_msg,
-           (w.q_count + w.bonus_count + w.boom_count) as total_cells
-    from public.weeks w where w.is_active limit 1
+           (w.q_count + w.bonus_count + w.boom_count) as total_cells,
+           now() as server_now, p.phase
+    from public.weeks w
+    cross join lateral (select case
+        when w.start_at is not null and now() < w.start_at then 'upcoming'
+        when w.end_at   is not null and now() > w.end_at   then 'ended'
+        else 'open' end as phase) p
+    where w.is_active
+    order by case p.phase when 'open' then 0 when 'upcoming' then 1 else 2 end,
+             case when p.phase = 'upcoming' then w.start_at end asc,
+             w.start_at desc nulls last
+    limit 1
   ) x;
 $$;
 
@@ -142,6 +159,8 @@ declare w public.weeks; v_name text := regexp_replace(trim(coalesce(p_name,'')),
 begin
   select * into w from public.weeks where id = p_week and is_active;
   if not found then raise exception 'NOT_ACTIVE'; end if;
+  if w.start_at is not null and now() < w.start_at then raise exception 'NOT_STARTED'; end if;
+  if w.end_at   is not null and now() > w.end_at   then raise exception 'ENDED'; end if;
   if length(v_name) < 2 or length(v_name) > 60 or coalesce(p_device,'') = '' then raise exception 'BAD_NAME'; end if;
   if w.turns > (w.q_count + w.bonus_count + w.boom_count) then raise exception 'BAD_CONFIG'; end if;
   v_key := public.norm_text(v_name);
@@ -274,24 +293,25 @@ language sql stable security definer set search_path = public as $$
 $$;
 
 -- Top 3 của mọi tuần (bảng vinh danh)
+drop function if exists public.weekly_winners();
 create or replace function public.weekly_winners()
-returns table (week_id uuid, title text, theme text, emoji text, week_start date, rank bigint,
+returns table (week_id uuid, title text, theme text, emoji text, start_at timestamptz, rank bigint,
                player_name text, score int, correct_count int, duration_ms int)
 language sql stable security definer set search_path = public as $$
   select * from (
-    select w.id, w.title, w.theme, w.emoji, w.week_start,
+    select w.id, w.title, w.theme, w.emoji, w.start_at,
            row_number() over (partition by w.id order by s.score desc, s.duration_ms asc, s.finished_at asc) as rk,
            s.player_name, s.score, s.correct_count, s.duration_ms
     from public.weeks w join public.sessions s on s.week_id = w.id and s.status = 'finished'
   ) t where rk <= 3
-  order by week_start desc nulls last, title desc, rk;
+  order by start_at desc nulls last, title desc, rk;
 $$;
 
 -- Danh sách tuần để xem lại bảng xếp hạng (không lộ câu hỏi)
 create or replace function public.list_weeks() returns jsonb
 language sql stable security definer set search_path = public as $$
-  select coalesce(jsonb_agg(to_jsonb(x) order by x.week_start desc nulls last, x.created_at desc), '[]')
-  from (select id, title, theme, emoji, color, week_start, is_active, created_at from public.weeks) x;
+  select coalesce(jsonb_agg(to_jsonb(x) order by x.start_at desc nulls last, x.created_at desc), '[]')
+  from (select id, title, theme, emoji, color, start_at, end_at, is_active, created_at from public.weeks where is_active) x;
 $$;
 
 grant execute on function
@@ -358,10 +378,12 @@ language plpgsql stable security definer set search_path = public as $$
 begin
   perform public.admin_guard(p_token);
   return coalesce((
-    select jsonb_agg(to_jsonb(x) order by x.week_start desc nulls last, x.created_at desc) from (
-      select w.*,
-        (select count(*) from public.questions q where q.week_id = w.id) as q_total,
-        (select count(*) from public.sessions s  where s.week_id = w.id) as s_total
+    select jsonb_agg(x.j order by x.ws desc nulls last, x.ca desc) from (
+      select (to_jsonb(w) - 'bg_image') || jsonb_build_object(
+               'has_bg', w.bg_image is not null,
+               'q_total', (select count(*) from public.questions q where q.week_id = w.id),
+               's_total', (select count(*) from public.sessions s  where s.week_id = w.id)) as j,
+             w.start_at as ws, w.created_at as ca
       from public.weeks w) x
   ), '[]'::jsonb);
 end $$;
@@ -396,7 +418,9 @@ begin
     theme        = coalesce(p_week->>'theme', theme),
     emoji        = coalesce(nullif(p_week->>'emoji',''), emoji),
     color        = coalesce(nullif(p_week->>'color',''), color),
-    week_start   = case when p_week ? 'week_start' then nullif(p_week->>'week_start','')::date else week_start end,
+    bg_image     = case when p_week ? 'bg_image' then nullif(p_week->>'bg_image','') else bg_image end,
+    start_at     = case when p_week ? 'start_at' then nullif(p_week->>'start_at','')::timestamptz else start_at end,
+    end_at       = case when p_week ? 'end_at'   then nullif(p_week->>'end_at','')::timestamptz   else end_at end,
     q_count      = coalesce((p_week->>'q_count')::int, q_count),
     bonus_count  = coalesce((p_week->>'bonus_count')::int, bonus_count),
     boom_count   = coalesce((p_week->>'boom_count')::int, boom_count),
@@ -407,6 +431,9 @@ begin
     bonus_msg    = coalesce(p_week->>'bonus_msg', bonus_msg),
     boom_msg     = coalesce(p_week->>'boom_msg', boom_msg)
   where id = v_id;
+  if exists (select 1 from public.weeks where id = v_id and start_at is not null and end_at is not null and end_at <= start_at) then
+    raise exception 'BAD_TIME';  -- rollback cả hàm
+  end if;
   return v_id;
 end $$;
 
@@ -414,7 +441,6 @@ create or replace function public.admin_set_active(p_token uuid, p_id uuid, p_on
 language plpgsql security definer set search_path = public as $$
 begin
   perform public.admin_guard(p_token);
-  if p_on then update public.weeks set is_active = false where is_active; end if;
   update public.weeks set is_active = p_on where id = p_id;
 end $$;
 

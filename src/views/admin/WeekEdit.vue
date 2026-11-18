@@ -1,17 +1,23 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { adm } from '../../lib/admin'
 import { parseQuestionFile, sampleCsv } from '../../lib/importer'
 import { fmtDuration } from '../../lib/format'
+import { BG_W, BG_H, processBackground, downloadGuide } from '../../lib/background'
+import { notify, confirmDialog } from '../../lib/notify'
+import DateTimeField from '../../components/DateTimeField.vue'
 
 const route = useRoute()
 const id = route.params.id
 const week = ref(null)
 const questions = ref([])
 const sessions = ref([])
+// error/info được hiện bằng toast
 const error = ref('')
 const info = ref('')
+watch(error, (v) => { if (v) { notify.error(v); error.value = '' } })
+watch(info, (v) => { if (v) { notify.success(v); info.value = '' } })
 
 // --- import
 const preview = ref(null) // { questions, errors, fileName }
@@ -39,9 +45,32 @@ onMounted(load)
 async function saveSettings() {
   error.value = info.value = ''
   try {
-    await adm('admin_save_week', { p_week: { ...week.value, week_start: week.value.week_start || '' } })
+    const { bg_image, ...rest } = week.value // ảnh nền lưu riêng, không gửi lại mỗi lần
+    await adm('admin_save_week', { p_week: { ...rest, start_at: rest.start_at || '', end_at: rest.end_at || '' } })
     info.value = 'Đã lưu cấu hình.'
   } catch (e) { error.value = e.message }
+}
+
+const bgBusy = ref(false)
+async function saveBg(dataUrl) {
+  await adm('admin_save_week', { p_week: { id, bg_image: dataUrl || '' } })
+  week.value.bg_image = dataUrl || null
+}
+async function onBg(ev) {
+  error.value = info.value = ''
+  const f = ev.target.files?.[0]
+  ev.target.value = ''
+  if (!f) return
+  bgBusy.value = true
+  try {
+    await saveBg(await processBackground(f))
+    info.value = 'Đã cập nhật ảnh nền.'
+  } catch (e) { error.value = e.message } finally { bgBusy.value = false }
+}
+async function removeBg() {
+  if (!(await confirmDialog('Xóa ảnh nền của tuần này?', { title: 'Xóa ảnh nền', confirmText: 'Xóa' }))) return
+  bgBusy.value = true
+  try { await saveBg(null) } catch (e) { error.value = e.message } finally { bgBusy.value = false }
 }
 
 function downloadTemplate() {
@@ -78,19 +107,19 @@ async function doImport() {
 }
 
 async function delQuestion(q) {
-  if (!confirm('Xóa câu hỏi này?')) return
+  if (!(await confirmDialog('Xóa câu hỏi này?', { title: 'Xóa câu hỏi', confirmText: 'Xóa' }))) return
   try { await adm('admin_delete_question', { p_id: q.id }) } catch (e) { error.value = e.message }
   await load()
 }
 
 async function delSession(s) {
-  if (!confirm(`Xóa kết quả của "${s.player_name}"? Người này sẽ được chơi lại.`)) return
+  if (!(await confirmDialog(`Xóa kết quả của "${s.player_name}"? Người này sẽ được chơi lại.`, { title: 'Xóa kết quả', confirmText: 'Xóa' }))) return
   try { await adm('admin_delete_session', { p_id: s.id }) } catch (e) { error.value = e.message }
   await load()
 }
 
 async function clearSessions() {
-  if (!confirm('Xóa TOÀN BỘ kết quả của tuần này (dùng để xóa lượt chạy thử)?')) return
+  if (!(await confirmDialog('Xóa TOÀN BỘ kết quả của tuần này (dùng để xóa lượt chạy thử)?', { title: 'Xóa tất cả kết quả', confirmText: 'Xóa tất cả' }))) return
   try { await adm('admin_clear_sessions', { p_week: id }) } catch (e) { error.value = e.message }
   await load()
 }
@@ -115,8 +144,6 @@ function exportResults() {
   <div v-if="!week" class="spinner" />
   <template v-else>
     <h1>{{ week.emoji }} {{ week.title }}</h1>
-    <p v-if="error" class="msg err">{{ error }}</p>
-    <p v-if="info" class="msg ok">{{ info }}</p>
     <p v-if="configError" class="msg err">⚠️ {{ configError }}</p>
 
     <!-- 1. Import -->
@@ -166,13 +193,37 @@ function exportResults() {
       </div>
     </section>
 
+    <!-- Ảnh nền -->
+    <section class="card">
+      <h2>🖼 Ảnh nền khi chơi (template)</h2>
+      <p class="muted small">
+        Yêu cầu đúng <b>{{ BG_W }} × {{ BG_H }} px</b> (ảnh dọc 9:16), định dạng JPG/PNG/WebP, tối đa 8MB.
+        Trên máy tính ảnh được phủ kín màn hình và tự cắt phần thừa. Người chơi của tuần này sẽ chơi trên nền này.
+      </p>
+      <div class="bgrow">
+        <div class="bgprev" :style="week.bg_image ? { backgroundImage: `url(${week.bg_image})` } : {}">
+          <span v-if="!week.bg_image">Chưa có ảnh nền</span>
+        </div>
+        <div class="bgctl">
+          <div class="field"><label>Tải ảnh nền lên</label><input type="file" accept="image/jpeg,image/png,image/webp" :disabled="bgBusy" @change="onBg" /></div>
+          <div class="actions">
+            <button class="btn ghost sm" type="button" @click="downloadGuide">⬇ Khung mẫu {{ BG_W }}×{{ BG_H }}</button>
+            <button v-if="week.bg_image" class="btn danger sm" type="button" :disabled="bgBusy" @click="removeBg">Xóa ảnh nền</button>
+          </div>
+          <p v-if="bgBusy" class="muted small">Đang xử lý…</p>
+        </div>
+      </div>
+    </section>
+
     <!-- 2. Cấu hình -->
     <form class="card" @submit.prevent="saveSettings">
       <h2>2. Cấu hình tuần</h2>
+      <div class="field"><label>Tên tuần</label><input v-model="week.title" required /></div>
       <div class="row">
-        <div class="field" style="flex: 3 1 220px"><label>Tên tuần</label><input v-model="week.title" required /></div>
-        <div class="field"><label>Ngày bắt đầu</label><input v-model="week.week_start" type="date" /></div>
+        <DateTimeField v-model="week.start_at" label="Bắt đầu (ngày giờ)" />
+        <DateTimeField v-model="week.end_at" label="Kết thúc (ngày giờ)" :min-date="week.start_at || null" />
       </div>
+      <p class="muted small">Người chơi chỉ vào chơi được trong khung giờ này, và tuần phải ở trạng thái "Công khai". Bỏ trống = không giới hạn.</p>
       <div class="field"><label>Chủ đề / mô tả</label><input v-model="week.theme" /></div>
       <div class="row">
         <div class="field"><label>Hình ô (emoji)</label><input v-model="week.emoji" maxlength="4" /></div>
@@ -255,6 +306,13 @@ function exportResults() {
 <style scoped>
 .between { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.bgrow { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+.bgprev {
+  width: 124px; aspect-ratio: 9 / 16; flex: none; border-radius: 12px; border: 1px dashed var(--line);
+  background: var(--panel-2) center / cover no-repeat; display: grid; place-items: center; text-align: center;
+  color: var(--muted); font-size: .75rem; padding: 6px;
+}
+.bgctl { flex: 1 1 240px; min-width: 0; }
 .preview { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 14px; }
 .ok-text { color: var(--good); font-weight: 700; }
 .bad-text { color: var(--bad); font-weight: 700; }

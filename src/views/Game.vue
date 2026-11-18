@@ -218,12 +218,13 @@ function closeOverlay() { overlay.value = null }
 </template>
 
 <style scoped>
-.hud { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 8px; padding: 12px 16px; }
+.hud { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 8px; padding: 12px 16px; max-width: 520px; margin: 0 auto 14px; }
+@media (max-width: 380px) { .hud { padding: 10px 12px; } .hud .score { font-size: 1.2rem; } }
 .hud div { display: flex; flex-direction: column; min-width: 0; }
 .hud b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 1.05rem; }
 .hud .score { color: var(--accent); font-size: 1.4rem; }
 
-.grid { display: grid; gap: 10px; margin: 14px 0; }
+.grid { display: grid; gap: clamp(8px, 2.5vw, 14px); margin: 14px auto; max-width: 520px; }
 .cell {
   aspect-ratio: 1; border-radius: 16px; border: 2px solid var(--line); background: var(--panel-2);
   font-size: clamp(1.8rem, 9vw, 3rem); display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -240,7 +241,7 @@ function closeOverlay() { overlay.value = null }
 .modal { position: fixed; inset: 0; background: rgba(0,0,0,.72); display: flex; align-items: flex-end; justify-content: center; z-index: 50; padding: 0; }
 @media (min-width: 640px) { .modal { align-items: center; padding: 16px; } }
 .sheet {
-  background: var(--panel); border: 1px solid var(--line); width: 100%; max-width: 560px; max-height: 92vh; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--line); width: 100%; max-width: 560px; max-height: 92vh; max-height: 92dvh; overflow-y: auto; overscroll-behavior: contain;
   border-radius: 22px 22px 0 0; padding: 20px 18px calc(20px + env(safe-area-inset-bottom));
 }
 @media (min-width: 640px) { .sheet { border-radius: 22px; } }

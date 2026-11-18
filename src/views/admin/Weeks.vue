@@ -2,39 +2,42 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { adm, adminLogout } from '../../lib/admin'
-import { fmtDate } from '../../lib/format'
+import { fmtWindow, weekPhase } from '../../lib/format'
+import { notify, confirmDialog } from '../../lib/notify'
+import DateTimeField from '../../components/DateTimeField.vue'
 
 const router = useRouter()
 const weeks = ref([])
 const loading = ref(true)
-const error = ref('')
-const form = ref({ title: '', theme: '', emoji: '🎃', color: '#f97316', week_start: '' })
+const form = ref({ title: '', theme: '', emoji: '🎃', color: '#f97316', start_at: '', end_at: '' })
 const creating = ref(false)
 
 async function load() {
-  try { weeks.value = await adm('admin_list_weeks') } catch (e) { error.value = e.message }
+  try { weeks.value = await adm('admin_list_weeks') } catch (e) { notify.error(e.message) }
   loading.value = false
 }
 onMounted(load)
 
 async function create() {
-  error.value = ''
   creating.value = true
   try {
-    const id = await adm('admin_save_week', { p_week: { ...form.value, week_start: form.value.week_start || '' } })
+    const id = await adm('admin_save_week', { p_week: { ...form.value } })
+    notify.success('Đã tạo tuần mới')
     router.push(`/admin/weeks/${id}`)
-  } catch (e) { error.value = e.message } finally { creating.value = false }
+  } catch (e) { notify.error(e.message) } finally { creating.value = false }
 }
 
 async function setActive(w, on) {
-  error.value = ''
-  try { await adm('admin_set_active', { p_id: w.id, p_on: on }) } catch (e) { error.value = e.message }
+  try {
+    await adm('admin_set_active', { p_id: w.id, p_on: on })
+    notify.success(on ? 'Đã công khai tuần này' : 'Đã ẩn tuần này')
+  } catch (e) { notify.error(e.message) }
   await load()
 }
 
 async function remove(w) {
-  if (!confirm(`Xóa tuần "${w.title}" cùng toàn bộ câu hỏi và kết quả?`)) return
-  try { await adm('admin_delete_week', { p_id: w.id }) } catch (e) { error.value = e.message }
+  if (!(await confirmDialog(`Xóa tuần "${w.title}" cùng toàn bộ câu hỏi và kết quả?`, { title: 'Xóa tuần', confirmText: 'Xóa' }))) return
+  try { await adm('admin_delete_week', { p_id: w.id }); notify.success('Đã xóa tuần') } catch (e) { notify.error(e.message) }
   await load()
 }
 
@@ -42,6 +45,8 @@ function logout() {
   adminLogout()
   router.push('/admin/login')
 }
+
+const phaseLabel = { open: 'ĐANG MỞ', upcoming: 'SẮP MỞ', ended: 'ĐÃ KẾT THÚC' }
 </script>
 
 <template>
@@ -49,13 +54,13 @@ function logout() {
     <h1>Quản trị</h1>
     <button class="btn ghost sm" @click="logout">Đăng xuất</button>
   </div>
-  <p v-if="error" class="msg err">{{ error }}</p>
 
   <form class="card" @submit.prevent="create">
     <h2>➕ Tạo tuần mới</h2>
+    <div class="field"><label>Tên tuần</label><input v-model="form.title" placeholder="Tuần 47 - Black Friday" required /></div>
     <div class="row">
-      <div class="field" style="flex: 3 1 220px"><label>Tên tuần</label><input v-model="form.title" placeholder="Tuần 47 - Black Friday" required /></div>
-      <div class="field"><label>Ngày bắt đầu</label><input v-model="form.week_start" type="date" /></div>
+      <DateTimeField v-model="form.start_at" label="Bắt đầu" />
+      <DateTimeField v-model="form.end_at" label="Kết thúc" :min-date="form.start_at || null" />
     </div>
     <div class="field"><label>Chủ đề / mô tả</label><input v-model="form.theme" placeholder="Chủ đề của tuần" /></div>
     <div class="row">
@@ -67,19 +72,17 @@ function logout() {
 
   <div v-if="loading" class="spinner" />
   <div v-for="w in weeks" :key="w.id" class="card week">
-    <div class="between">
-      <div>
-        <h2>{{ w.emoji }} {{ w.title }} <span v-if="w.is_active" class="badge live">ĐANG MỞ</span></h2>
-        <p class="muted small">
-          {{ w.theme }} <template v-if="w.week_start">· {{ fmtDate(w.week_start) }}</template>
-          · {{ w.q_total }} câu hỏi · {{ w.s_total }} lượt chơi
-        </p>
-      </div>
-    </div>
+    <h2>
+      {{ w.emoji }} {{ w.title }}
+      <span v-if="!w.is_active" class="badge">NHÁP</span>
+      <span v-else class="badge" :class="{ live: weekPhase(w) === 'open', ok: weekPhase(w) === 'upcoming' }">{{ phaseLabel[weekPhase(w)] }}</span>
+    </h2>
+    <p class="muted small">⏰ {{ fmtWindow(w) }}</p>
+    <p class="muted small">{{ w.theme }} · {{ w.q_total }} câu hỏi · {{ w.s_total }} lượt chơi</p>
     <div class="actions">
       <router-link :to="`/admin/weeks/${w.id}`" class="btn sm">Quản lý</router-link>
-      <button v-if="!w.is_active" class="btn ghost sm" @click="setActive(w, true)">Mở cho người chơi</button>
-      <button v-else class="btn ghost sm" @click="setActive(w, false)">Đóng tuần</button>
+      <button v-if="!w.is_active" class="btn ghost sm" @click="setActive(w, true)">Công khai</button>
+      <button v-else class="btn ghost sm" @click="setActive(w, false)">Ẩn (nháp)</button>
       <button class="btn danger sm" @click="remove(w)">Xóa</button>
     </div>
   </div>
@@ -90,4 +93,5 @@ function logout() {
 .between { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .week h2 { margin: 0 0 4px; }
+.week p { margin: 2px 0; }
 </style>

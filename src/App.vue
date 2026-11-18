@@ -1,7 +1,10 @@
 <script setup>
+import { watchEffect } from 'vue'
 import { useRoute } from 'vue-router'
 import { configured } from './lib/supabase'
 const route = useRoute()
+// trang admin luôn dùng nền mặc định, không dùng ảnh nền của tuần
+watchEffect(() => document.documentElement.classList.toggle('no-bg', route.path.startsWith('/admin')))
 </script>
 
 <template>

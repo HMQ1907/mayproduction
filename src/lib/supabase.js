@@ -18,6 +18,9 @@ const ERRORS = {
   PENDING: 'Hãy trả lời câu hỏi đang mở trước.',
   ALREADY_OPENED: 'Ô này đã được mở.',
   NO_PENDING: 'Không có câu hỏi nào đang mở.',
+  NOT_STARTED: 'Tuần chơi này chưa đến giờ bắt đầu.',
+  ENDED: 'Tuần chơi này đã kết thúc.',
+  BAD_TIME: 'Giờ kết thúc phải sau giờ bắt đầu.',
   BAD_LOGIN: 'Sai tên đăng nhập hoặc mật khẩu.',
   UNAUTHORIZED: 'Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.',
 }
