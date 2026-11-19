@@ -5,6 +5,8 @@ import { rpc } from '../lib/supabase'
 import { deviceId } from '../lib/device'
 import { state, loadActiveWeek } from '../store'
 import { fmtDuration, medals } from '../lib/format'
+import { sfx, bgm } from '../lib/sound'
+import { notify } from '../lib/notify'
 import Podium from '../components/Podium.vue'
 
 const router = useRouter()
@@ -12,17 +14,20 @@ const sess = ref(null)
 const loading = ref(true)
 const error = ref('')
 const busy = ref(false)
-const overlay = ref(null) // { kind: 'bonus' | 'boom' | 'feedback', ... }
+const overlay = ref(null) // { kind: 'bonus' | 'boom' | 'feedback', ... } tự đóng sau ít giây
 const timeLeft = ref(0)
 const textAnswer = ref('')
 const picked = ref('')
 const board = ref([])
 const myRank = ref(null)
 let timer = null
+let overlayTimer = null
 let deadline = 0
 let submitting = false
+let lastTick = -1
 
 const week = computed(() => state.week)
+const showFeedback = computed(() => Boolean(week.value?.show_feedback))
 const emoji = computed(() => week.value?.emoji || '🎁')
 const pending = computed(() => sess.value?.pending || null)
 const finished = computed(() => sess.value?.status === 'finished')
@@ -43,10 +48,25 @@ onMounted(async () => {
     const s = await rpc('my_session', { p_week: state.week.id, p_device: deviceId() })
     if (!s) return router.replace('/')
     sess.value = s
+    startMusic()
   } catch (e) { error.value = e.message }
   loading.value = false
 })
-onBeforeUnmount(stopTimer)
+// Nhạc nền riêng của tuần (nếu có) tải riêng, nếu lỗi hoặc chưa có thì dùng nhạc tự tạo
+async function startMusic() {
+  let src = null
+  if (state.week?.has_bgm) {
+    try { src = await rpc('get_week_music', { p_week: state.week.id }) } catch { /* dùng nhạc tự tạo */ }
+  }
+  if (!gone) bgm.start(src)
+}
+let gone = false
+onBeforeUnmount(() => {
+  gone = true
+  stopTimer()
+  clearTimeout(overlayTimer)
+  bgm.stop()
+})
 
 // Chạy đồng hồ mỗi khi có câu hỏi mới
 watch(pending, (p, old) => {
@@ -55,18 +75,24 @@ watch(pending, (p, old) => {
   textAnswer.value = ''
   picked.value = ''
   submitting = false
+  lastTick = -1
   deadline = Date.now() + p.remaining * 1000
   stopTimer()
   tick()
   timer = setInterval(tick, 100)
 })
 
-// Hết game -> tải bảng điểm để biết hạng
+// Hết game: tải bảng điểm (top 10) và hạng của chính mình
 watch(showResult, async (v) => {
-  if (!v || board.value.length) return
+  if (!v) return
+  sfx.finish()
   try {
-    board.value = await rpc('leaderboard', { p_week: sess.value.week_id, p_limit: 200 })
-    myRank.value = board.value.find((r) => r.player_name === sess.value.player_name)?.rank ?? null
+    const [b, r] = await Promise.all([
+      rpc('leaderboard', { p_week: sess.value.week_id, p_limit: 10 }),
+      rpc('my_rank', { p_session: sess.value.id, p_device: deviceId() }),
+    ])
+    board.value = b
+    myRank.value = r
   } catch { /* không quan trọng */ }
 })
 
@@ -74,19 +100,28 @@ function stopTimer() { if (timer) clearInterval(timer); timer = null }
 function tick() {
   const left = Math.max(0, (deadline - Date.now()) / 1000)
   timeLeft.value = left
+  const sec = Math.ceil(left)
+  if (sec <= 5 && sec > 0 && sec !== lastTick) { lastTick = sec; sfx.tick() }
   if (left <= 0) { stopTimer(); submit('') }
 }
+
+function showOverlay(o, ms = 1700) {
+  clearTimeout(overlayTimer)
+  overlay.value = o
+  overlayTimer = setTimeout(closeOverlay, ms)
+}
+function closeOverlay() { clearTimeout(overlayTimer); overlay.value = null }
 
 async function openCell(i) {
   if (busy.value || pending.value || overlay.value || finished.value || cells.value[i]) return
   busy.value = true
   error.value = ''
+  sfx.open()
   try {
     const r = await rpc('open_cell', { p_session: sess.value.id, p_device: deviceId(), p_idx: i })
     sess.value = r.session
-    if (r.kind === 'bonus' || r.kind === 'boom') {
-      overlay.value = { kind: r.kind, delta: r.delta }
-    }
+    if (r.kind === 'bonus') { sfx.bonus(); showOverlay({ kind: 'bonus', delta: r.delta }) }
+    else if (r.kind === 'boom') { sfx.boom(); showOverlay({ kind: 'boom', delta: r.delta }) }
   } catch (e) { error.value = e.message } finally { busy.value = false }
 }
 
@@ -95,17 +130,23 @@ async function submit(answer) {
   submitting = true
   stopTimer()
   picked.value = answer
+  if (answer) sfx.select()
   try {
     const r = await rpc('answer_question', { p_session: sess.value.id, p_device: deviceId(), p_answer: answer })
     sess.value = r.session
-    overlay.value = { kind: 'feedback', ok: r.ok, delta: r.delta, correct: r.correct_answer, timeout: !answer }
+    if (!answer) sfx.timeout()
+    if (showFeedback.value) {
+      // chỉ hiện nhanh rồi tự quay lại bảng, không có bước "chọn ô tiếp theo"
+      if (answer) (r.ok ? sfx.correct : sfx.wrong)()
+      showOverlay({ kind: 'feedback', ok: r.ok, delta: r.delta, correct: r.correct_answer, timeout: !answer }, 1500)
+    } else if (!answer) {
+      notify.info('⏰ Hết giờ!')
+    }
   } catch (e) {
     error.value = e.message
     submitting = false
   }
 }
-
-function closeOverlay() { overlay.value = null }
 </script>
 
 <template>
@@ -117,7 +158,7 @@ function closeOverlay() { overlay.value = null }
     <div class="hud card">
       <div><span class="muted small">Người chơi</span><b>{{ sess.player_name }}</b></div>
       <div><span class="muted small">Lượt còn lại</span><b>{{ turnsLeft }}</b></div>
-      <div><span class="muted small">Điểm</span><b class="score">{{ sess.score }}</b></div>
+      <div><span class="muted small">Điểm</span><b class="score">{{ sess.score ?? '?' }}</b></div>
     </div>
 
     <p v-if="error" class="msg err">{{ error }}</p>
@@ -130,8 +171,8 @@ function closeOverlay() { overlay.value = null }
         class="cell"
         :class="{
           opened: c,
-          good: c && (c.t === 'bonus' || c.ok),
-          bad: c && (c.t === 'boom' || (c.t === 'q' && !c.ok)),
+          good: c && (c.t === 'bonus' || c.ok === true),
+          bad: c && (c.t === 'boom' || c.ok === false),
         }"
         :disabled="!!c || busy || finished"
         @click="openCell(i)"
@@ -139,8 +180,9 @@ function closeOverlay() { overlay.value = null }
         <template v-if="!c">{{ emoji }}</template>
         <template v-else-if="c.t === 'bonus'">🎁<small>+{{ c.delta }}</small></template>
         <template v-else-if="c.t === 'boom'">💣<small>{{ c.delta }}</small></template>
-        <template v-else-if="c.ok">✅<small>+{{ c.delta }}</small></template>
-        <template v-else>❌<small>0</small></template>
+        <template v-else-if="c.ok === true">✅<small>+{{ c.delta }}</small></template>
+        <template v-else-if="c.ok === false">❌<small>0</small></template>
+        <template v-else>📝<small>Đã trả lời</small></template>
       </button>
     </div>
     <p class="muted center small" v-if="!finished">Chạm vào một ô để mở. Ô đã mở không thể mở lại.</p>
@@ -176,8 +218,8 @@ function closeOverlay() { overlay.value = null }
       </div>
     </div>
 
-    <!-- Kết quả 1 ô -->
-    <div v-if="overlay" class="modal" @click.self="closeOverlay">
+    <!-- Kết quả nhanh (BONUS / BOOM / đúng-sai nếu tuần bật): tự đóng, chạm để đóng sớm -->
+    <div v-if="overlay" class="modal" @click="closeOverlay">
       <div class="sheet pop center">
         <template v-if="overlay.kind === 'bonus'">
           <div class="big">🎁</div>
@@ -196,9 +238,6 @@ function closeOverlay() { overlay.value = null }
           </h2>
           <p v-if="!overlay.ok" class="muted">Đáp án đúng: <b>{{ overlay.correct }}</b></p>
         </template>
-        <button class="btn block" @click="closeOverlay">
-          {{ finished ? 'Xem kết quả' : 'Chọn ô tiếp theo' }}
-        </button>
       </div>
     </div>
 
@@ -209,7 +248,9 @@ function closeOverlay() { overlay.value = null }
         <h2>Hoàn thành, {{ sess.player_name }}!</h2>
         <p class="score-big">{{ sess.score }} <small>điểm</small></p>
         <p class="muted">{{ sess.correct_count }} câu đúng · {{ fmtDuration(sess.duration_ms) }}</p>
-        <p v-if="myRank" class="rank">Hạng hiện tại: <b>{{ medals[myRank - 1] || '#' + myRank }}</b> / {{ board.length }}</p>
+        <p v-if="myRank" class="rank">
+          Hạng của bạn: <b>{{ medals[myRank.rank - 1] || '#' + myRank.rank }}</b> / {{ myRank.total }}
+        </p>
         <Podium :rows="board" />
         <router-link to="/leaderboard" class="btn block">Xem bảng xếp hạng</router-link>
       </div>

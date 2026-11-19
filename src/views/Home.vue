@@ -6,6 +6,7 @@ import { deviceId } from '../lib/device'
 import { state, loadActiveWeek } from '../store'
 import { fmtDateTime, fmtDuration, fmtCountdown } from '../lib/format'
 import { notify } from '../lib/notify'
+import { sfx } from '../lib/sound'
 import Podium from '../components/Podium.vue'
 
 const router = useRouter()
@@ -71,6 +72,7 @@ async function start() {
   busy.value = true
   try {
     await rpc('start_session', { p_week: week.value.id, p_name: name.value, p_device: deviceId() })
+    sfx.start()
     router.push('/play')
   } catch (e) {
     error.value = e.message
@@ -115,7 +117,7 @@ async function start() {
         <h2>Luật chơi</h2>
         <ul class="rules">
           <li>Có <b>{{ week.total_cells }}</b> ô bí ẩn, bạn được mở <b>{{ week.turns }}</b> ô.</li>
-          <li>✅ Trả lời đúng: <b>+{{ week.points }}</b> điểm (trắc nghiệm {{ week.mcq_seconds }}s, nhập chữ {{ week.text_seconds }}s). Sai hoặc hết giờ: không trừ điểm.</li>
+          <li>✅ Trả lời đúng: <b>+{{ week.points }}</b> điểm (trắc nghiệm {{ week.mcq_seconds }}s, nhập chữ {{ week.text_seconds }}s). Sai hoặc hết giờ: không trừ điểm.<template v-if="!week.show_feedback"> Kết quả đúng/sai và điểm sẽ được công bố khi bạn mở xong lượt cuối.</template></li>
           <li>🎁 Ô thưởng: <b>+{{ week.points }}</b> &nbsp; 💣 Ô BOOM: <b>−{{ week.points }}</b></li>
           <li>Xếp hạng theo điểm, bằng điểm thì ai hoàn thành nhanh hơn đứng trước.</li>
           <li>Mỗi người chỉ chơi <b>1 lần mỗi tuần</b> (chặn theo tên và thiết bị).</li>
@@ -124,7 +126,7 @@ async function start() {
 
       <section class="card" v-if="mine?.status === 'playing'">
         <h2>Bạn đang chơi dở, {{ mine.player_name }}</h2>
-        <p class="muted">Đã mở {{ mine.opened.length }}/{{ mine.turns }} ô · {{ mine.score }} điểm</p>
+        <p class="muted">Đã mở {{ mine.opened.length }}/{{ mine.turns }} ô<template v-if="mine.score != null"> · {{ mine.score }} điểm</template></p>
         <router-link to="/play" class="btn block">Tiếp tục chơi</router-link>
       </section>
 

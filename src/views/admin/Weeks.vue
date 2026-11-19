@@ -52,7 +52,10 @@ const phaseLabel = { open: 'ĐANG MỞ', upcoming: 'SẮP MỞ', ended: 'ĐÃ K�
 <template>
   <div class="between">
     <h1>Quản trị</h1>
-    <button class="btn ghost sm" @click="logout">Đăng xuất</button>
+    <div class="actions" style="margin: 0">
+      <router-link to="/admin/results" class="btn sm">📊 Tổng kết quả</router-link>
+      <button class="btn ghost sm" @click="logout">Đăng xuất</button>
+    </div>
   </div>
 
   <form class="card" @submit.prevent="create">

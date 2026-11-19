@@ -7,6 +7,7 @@ const routes = [
   { path: '/leaderboard', component: () => import('./views/Leaderboard.vue') },
   { path: '/admin/login', component: () => import('./views/admin/Login.vue') },
   { path: '/admin', component: () => import('./views/admin/Weeks.vue'), meta: { admin: true } },
+  { path: '/admin/results', component: () => import('./views/admin/Results.vue'), meta: { admin: true } },
   { path: '/admin/weeks/:id', component: () => import('./views/admin/WeekEdit.vue'), meta: { admin: true } },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]

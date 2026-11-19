@@ -45,6 +45,12 @@ alter table public.weeks add column if not exists bg_image text;
 -- khung giờ chơi (có giờ phút). is_active = "đã công khai"; chơi được khi nằm trong khung giờ
 alter table public.weeks add column if not exists start_at timestamptz;
 alter table public.weeks add column if not exists end_at   timestamptz;
+-- hiện đúng/sai (và điểm) ngay sau mỗi câu? Mặc định ẩn, chỉ công bố khi kết thúc
+alter table public.weeks add column if not exists show_feedback boolean not null default false;
+-- kiểu nền có sẵn (khi không upload ảnh)
+alter table public.weeks add column if not exists bg_preset text;
+-- nhạc nền riêng của tuần (data URL mp3/ogg, tối đa 2MB). Chỉ tải riêng khi vào màn chơi
+alter table public.weeks add column if not exists bgm text;
 update public.weeks set start_at = week_start::timestamptz where start_at is null and week_start is not null;
 drop index if exists public.weeks_one_active;
 
@@ -91,10 +97,19 @@ $$;
 create or replace function public.session_view(p_id uuid) returns jsonb
 language plpgsql stable security definer set search_path = public as $$
 declare s public.sessions; w public.weeks; q public.questions; pend jsonb := null; secs int; remain numeric;
+        fb boolean; op jsonb;
 begin
   select * into s from public.sessions where id = p_id;
   if not found then return null; end if;
   select * into w from public.weeks where id = s.week_id;
+  -- đang chơi và tuần ẩn đúng/sai: không gửi kết quả từng câu và điểm về client
+  fb := w.show_feedback or s.status = 'finished';
+  if fb then
+    op := s.opened;
+  else
+    select coalesce(jsonb_agg(case when o->>'t' = 'q' then jsonb_build_object('i', o->'i', 't', 'q') else o end order by n), '[]'::jsonb)
+      into op from jsonb_array_elements(s.opened) with ordinality as x(o, n);
+  end if;
   if s.pending is not null then
     select * into q from public.questions where id = (s.pending->>'q')::uuid;
     secs := case when q.type = 'text' then w.text_seconds else w.mcq_seconds end;
@@ -112,8 +127,9 @@ begin
   return jsonb_build_object(
     'id', s.id, 'week_id', s.week_id, 'player_name', s.player_name,
     'total', jsonb_array_length(s.cells), 'turns', w.turns,
-    'opened', s.opened, 'pending', pend,
-    'score', s.score, 'correct_count', s.correct_count,
+    'opened', op, 'pending', pend,
+    'score', case when fb then s.score else null end,
+    'correct_count', case when fb then s.correct_count else null end,
     'status', s.status, 'duration_ms', s.duration_ms
   );
 end $$;
@@ -126,10 +142,11 @@ revoke all on function public.session_view(uuid) from public, anon, authenticate
 create or replace function public.get_active_week() returns jsonb
 language sql stable security definer set search_path = public as $$
   select to_jsonb(x) from (
-    select w.id, w.title, w.theme, w.emoji, w.color, w.bg_image, w.start_at, w.end_at,
+    select w.id, w.title, w.theme, w.emoji, w.color, w.bg_image, w.bg_preset, w.show_feedback, w.start_at, w.end_at,
            w.q_count, w.bonus_count, w.boom_count,
            w.turns, w.points, w.mcq_seconds, w.text_seconds, w.bonus_msg, w.boom_msg,
            (w.q_count + w.bonus_count + w.boom_count) as total_cells,
+           (w.bgm is not null) as has_bgm,
            now() as server_now, p.phase
     from public.weeks w
     cross join lateral (select case
@@ -142,6 +159,12 @@ language sql stable security definer set search_path = public as $$
              w.start_at desc nulls last
     limit 1
   ) x;
+$$;
+
+-- Nhạc nền của tuần (chỉ tải khi vào màn chơi)
+create or replace function public.get_week_music(p_week uuid) returns text
+language sql stable security definer set search_path = public as $$
+  select bgm from public.weeks where id = p_week and is_active;
 $$;
 
 -- Thiết bị này đã chơi tuần này chưa?
@@ -276,21 +299,40 @@ begin
         correct_count = correct_count + (case when ok then 1 else 0 end), pending = null
     where id = s.id;
   perform public.finish_if_done(s.id);
-  return jsonb_build_object('kind','answer','ok', ok, 'delta', delta,
-                            'correct_answer', replace(q.answer, '|', ' / '),
+  return jsonb_build_object('kind','answer',
+                            'ok',             case when w.show_feedback then ok else null end,
+                            'delta',          case when w.show_feedback then delta else null end,
+                            'correct_answer', case when w.show_feedback then replace(q.answer, '|', ' / ') else null end,
                             'session', public.session_view(s.id));
 end $$;
 
--- Bảng xếp hạng 1 tuần: điểm cao -> hoàn thành nhanh -> nộp sớm
-create or replace function public.leaderboard(p_week uuid, p_limit int default 200)
+-- Bảng xếp hạng công khai 1 tuần: chỉ trả tối đa TOP 10 (admin xem đầy đủ ở trang Tổng kết quả)
+-- Thứ tự: điểm cao -> hoàn thành nhanh -> nộp sớm
+create or replace function public.leaderboard(p_week uuid, p_limit int default 10)
 returns table (rank bigint, player_name text, score int, correct_count int, duration_ms int, finished_at timestamptz)
 language sql stable security definer set search_path = public as $$
   select row_number() over (order by s.score desc, s.duration_ms asc, s.finished_at asc),
          s.player_name, s.score, s.correct_count, s.duration_ms, s.finished_at
   from public.sessions s
   where s.week_id = p_week and s.status = 'finished'
-  order by 1 limit greatest(p_limit, 1);
+  order by 1 limit least(greatest(p_limit, 1), 10);
 $$;
+
+-- Hạng của chính người chơi (kể cả khi ngoài top 10)
+create or replace function public.my_rank(p_session uuid, p_device text) returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare me public.sessions; r bigint; n bigint;
+begin
+  select * into me from public.sessions where id = p_session and device_id = p_device and status = 'finished';
+  if not found then return null; end if;
+  select count(*) filter (where s.score > me.score
+                             or (s.score = me.score and s.duration_ms < me.duration_ms)
+                             or (s.score = me.score and s.duration_ms = me.duration_ms and s.finished_at < me.finished_at)) + 1,
+         count(*)
+    into r, n
+    from public.sessions s where s.week_id = me.week_id and s.status = 'finished';
+  return jsonb_build_object('rank', r, 'total', n);
+end $$;
 
 -- Top 3 của mọi tuần (bảng vinh danh)
 drop function if exists public.weekly_winners();
@@ -317,7 +359,7 @@ $$;
 grant execute on function
   public.get_active_week(), public.my_session(uuid,text), public.start_session(uuid,text,text),
   public.get_session(uuid,text), public.open_cell(uuid,text,int), public.answer_question(uuid,text,text),
-  public.leaderboard(uuid,int), public.weekly_winners(), public.list_weeks()
+  public.leaderboard(uuid,int), public.weekly_winners(), public.list_weeks(), public.my_rank(uuid,text), public.get_week_music(uuid)
 to anon, authenticated;
 
 -- ---------- Dọn bản cũ (dùng Supabase Auth), an toàn nếu chạy lần đầu ----
@@ -379,8 +421,9 @@ begin
   perform public.admin_guard(p_token);
   return coalesce((
     select jsonb_agg(x.j order by x.ws desc nulls last, x.ca desc) from (
-      select (to_jsonb(w) - 'bg_image') || jsonb_build_object(
+      select (to_jsonb(w) - 'bg_image' - 'bgm') || jsonb_build_object(
                'has_bg', w.bg_image is not null,
+               'has_bgm', w.bgm is not null,
                'q_total', (select count(*) from public.questions q where q.week_id = w.id),
                's_total', (select count(*) from public.sessions s  where s.week_id = w.id)) as j,
              w.start_at as ws, w.created_at as ca
@@ -393,7 +436,7 @@ language plpgsql stable security definer set search_path = public as $$
 begin
   perform public.admin_guard(p_token);
   return jsonb_build_object(
-    'week', (select to_jsonb(w) from public.weeks w where w.id = p_id),
+    'week', (select (to_jsonb(w) - 'bgm') || jsonb_build_object('has_bgm', w.bgm is not null) from public.weeks w where w.id = p_id),
     'questions', coalesce((select jsonb_agg(to_jsonb(q) order by q.position) from public.questions q where q.week_id = p_id), '[]'::jsonb),
     'sessions', coalesce((
       select jsonb_agg(jsonb_build_object('id', s.id, 'player_name', s.player_name, 'score', s.score,
@@ -418,6 +461,9 @@ begin
     theme        = coalesce(p_week->>'theme', theme),
     emoji        = coalesce(nullif(p_week->>'emoji',''), emoji),
     color        = coalesce(nullif(p_week->>'color',''), color),
+    show_feedback = coalesce((p_week->>'show_feedback')::boolean, show_feedback),
+    bgm          = case when p_week ? 'bgm' then nullif(p_week->>'bgm','') else bgm end,
+    bg_preset    = case when p_week ? 'bg_preset' then nullif(p_week->>'bg_preset','') else bg_preset end,
     bg_image     = case when p_week ? 'bg_image' then nullif(p_week->>'bg_image','') else bg_image end,
     start_at     = case when p_week ? 'start_at' then nullif(p_week->>'start_at','')::timestamptz else start_at end,
     end_at       = case when p_week ? 'end_at'   then nullif(p_week->>'end_at','')::timestamptz   else end_at end,
@@ -435,6 +481,31 @@ begin
     raise exception 'BAD_TIME';  -- rollback cả hàm
   end if;
   return v_id;
+end $$;
+
+-- Lấy nhạc nền của 1 tuần để admin nghe thử (kể cả tuần nháp)
+create or replace function public.admin_get_music(p_token uuid, p_id uuid) returns text
+language plpgsql stable security definer set search_path = public as $$
+begin
+  perform public.admin_guard(p_token);
+  return (select bgm from public.weeks where id = p_id);
+end $$;
+grant execute on function public.admin_get_music(uuid, uuid) to anon, authenticated;
+
+-- Toàn bộ kết quả của mọi tuần (admin xem đầy đủ, không giới hạn top 10)
+create or replace function public.admin_all_results(p_token uuid) returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+begin
+  perform public.admin_guard(p_token);
+  return coalesce((
+    select jsonb_agg(jsonb_build_object(
+             'id', s.id, 'week_id', w.id, 'week_title', w.title, 'week_emoji', w.emoji, 'week_start', w.start_at,
+             'player_name', s.player_name, 'name_key', s.name_key, 'score', s.score,
+             'correct_count', s.correct_count, 'duration_ms', s.duration_ms,
+             'status', s.status, 'started_at', s.started_at, 'finished_at', s.finished_at)
+           order by w.start_at desc nulls last, s.score desc, s.duration_ms asc nulls last)
+    from public.sessions s join public.weeks w on w.id = s.week_id
+  ), '[]'::jsonb);
 end $$;
 
 create or replace function public.admin_set_active(p_token uuid, p_id uuid, p_on boolean) returns void
@@ -493,5 +564,5 @@ grant execute on function
   public.admin_get_week(uuid,uuid), public.admin_save_week(uuid,jsonb), public.admin_set_active(uuid,uuid,boolean),
   public.admin_delete_week(uuid,uuid), public.admin_import_questions(uuid,uuid,text,jsonb),
   public.admin_delete_question(uuid,uuid), public.admin_delete_session(uuid,uuid),
-  public.admin_clear_sessions(uuid,uuid)
+  public.admin_clear_sessions(uuid,uuid), public.admin_all_results(uuid)
 to anon, authenticated;

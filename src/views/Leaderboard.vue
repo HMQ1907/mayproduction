@@ -27,7 +27,7 @@ const hall = computed(() => {
 
 async function loadRows() {
   if (!weekId.value) return
-  try { rows.value = await rpc('leaderboard', { p_week: weekId.value, p_limit: 200 }) } catch (e) { error.value = e.message }
+  try { rows.value = await rpc('leaderboard', { p_week: weekId.value, p_limit: 10 }) } catch (e) { error.value = e.message }
 }
 
 onMounted(async () => {
@@ -76,7 +76,7 @@ watch(weekId, loadRows)
       </div>
 
       <div class="card">
-        <h2>Bảng xếp hạng</h2>
+        <h2>Top 10 bảng xếp hạng</h2>
         <p v-if="!rows.length" class="muted">Chưa có ai hoàn thành tuần này.</p>
         <div v-else class="table-wrap">
           <table>

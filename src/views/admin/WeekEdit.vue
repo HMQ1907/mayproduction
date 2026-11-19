@@ -6,6 +6,8 @@ import { parseQuestionFile, sampleCsv } from '../../lib/importer'
 import { fmtDuration } from '../../lib/format'
 import { BG_W, BG_H, processBackground, downloadGuide } from '../../lib/background'
 import { notify, confirmDialog } from '../../lib/notify'
+import { PRESETS } from '../../lib/presets'
+import { processMusic, MUSIC_MAX_LABEL } from '../../lib/music'
 import DateTimeField from '../../components/DateTimeField.vue'
 
 const route = useRoute()
@@ -48,6 +50,45 @@ async function saveSettings() {
     const { bg_image, ...rest } = week.value // ảnh nền lưu riêng, không gửi lại mỗi lần
     await adm('admin_save_week', { p_week: { ...rest, start_at: rest.start_at || '', end_at: rest.end_at || '' } })
     info.value = 'Đã lưu cấu hình.'
+  } catch (e) { error.value = e.message }
+}
+
+// --- nhạc nền
+const musicBusy = ref(false)
+const musicUrl = ref('') // chỉ tải khi bấm nghe thử
+async function onMusic(ev) {
+  const f = ev.target.files?.[0]
+  ev.target.value = ''
+  if (!f) return
+  musicBusy.value = true
+  try {
+    const m = await processMusic(f)
+    await adm('admin_save_week', { p_week: { id, bgm: m.url } })
+    week.value.has_bgm = true
+    musicUrl.value = m.url
+    info.value = `Đã cập nhật nhạc nền (${(m.size / 1048576).toFixed(2)}MB, ${Math.round(m.duration)} giây).`
+  } catch (e) { error.value = e.message } finally { musicBusy.value = false }
+}
+async function loadMusic() {
+  musicBusy.value = true
+  try { musicUrl.value = await adm('admin_get_music', { p_id: id }) } catch (e) { error.value = e.message } finally { musicBusy.value = false }
+}
+async function removeMusic() {
+  if (!(await confirmDialog('Xóa nhạc nền của tuần này? Game sẽ dùng nhạc tự tạo mặc định.', { title: 'Xóa nhạc nền', confirmText: 'Xóa' }))) return
+  musicBusy.value = true
+  try {
+    await adm('admin_save_week', { p_week: { id, bgm: '' } })
+    week.value.has_bgm = false
+    musicUrl.value = ''
+    info.value = 'Đã xóa nhạc nền.'
+  } catch (e) { error.value = e.message } finally { musicBusy.value = false }
+}
+
+async function setPreset(key) {
+  try {
+    await adm('admin_save_week', { p_week: { id, bg_preset: key || '' } })
+    week.value.bg_preset = key || null
+    info.value = key ? 'Đã đổi kiểu nền.' : 'Đã về nền mặc định.'
   } catch (e) { error.value = e.message }
 }
 
@@ -195,7 +236,18 @@ function exportResults() {
 
     <!-- Ảnh nền -->
     <section class="card">
-      <h2>🖼 Ảnh nền khi chơi (template)</h2>
+      <h2>🖼 Nền khi chơi</h2>
+      <label>Chọn kiểu nền có sẵn</label>
+      <div class="presets">
+        <button type="button" class="swatch" :class="{ on: !week.bg_preset }" @click="setPreset('')">
+          <i style="background: #1f1a17" /><span>Mặc định</span>
+        </button>
+        <button v-for="p in PRESETS" :key="p.key" type="button" class="swatch" :class="{ on: week.bg_preset === p.key }" @click="setPreset(p.key)">
+          <i :style="{ background: p.css }" /><span>{{ p.name }}</span>
+        </button>
+      </div>
+      <p v-if="week.bg_image && week.bg_preset" class="muted small">Đang có ảnh upload nên ảnh sẽ được dùng thay cho kiểu nền có sẵn. Xóa ảnh nếu muốn dùng kiểu nền.</p>
+      <h3 style="margin-top: 14px">Hoặc upload ảnh riêng (template)</h3>
       <p class="muted small">
         Yêu cầu đúng <b>{{ BG_W }} × {{ BG_H }} px</b> (ảnh dọc 9:16), định dạng JPG/PNG/WebP, tối đa 8MB.
         Trên máy tính ảnh được phủ kín màn hình và tự cắt phần thừa. Người chơi của tuần này sẽ chơi trên nền này.
@@ -213,6 +265,24 @@ function exportResults() {
           <p v-if="bgBusy" class="muted small">Đang xử lý…</p>
         </div>
       </div>
+    </section>
+
+    <!-- Nhạc nền -->
+    <section class="card">
+      <h2>🎵 Nhạc nền khi chơi</h2>
+      <p class="muted small">
+        Tải file <b>MP3 hoặc OGG</b>, tối đa <b>{{ MUSIC_MAX_LABEL }}</b> mỗi lần import (khoảng 1–2 phút ở 128 kbps). Nhạc sẽ tự lặp lại.
+        Tiếng hiệu ứng (mở ô, Bonus, Boom…) vẫn phát cùng nhạc nền. Chưa có file thì game dùng nhạc tự tạo.
+      </p>
+      <div class="field"><label>Tải nhạc lên</label><input type="file" accept=".mp3,.ogg,audio/mpeg,audio/ogg" :disabled="musicBusy" @change="onMusic" /></div>
+      <p v-if="week.has_bgm" class="ok-text small">✔ Tuần này đã có nhạc nền riêng</p>
+      <p v-else class="muted small">Chưa có nhạc riêng (đang dùng nhạc tự tạo).</p>
+      <div class="actions">
+        <button v-if="week.has_bgm && !musicUrl" class="btn ghost sm" type="button" :disabled="musicBusy" @click="loadMusic">▶ Nghe thử</button>
+        <button v-if="week.has_bgm" class="btn danger sm" type="button" :disabled="musicBusy" @click="removeMusic">Xóa nhạc</button>
+      </div>
+      <audio v-if="musicUrl" :src="musicUrl" controls loop class="player" />
+      <p v-if="musicBusy" class="muted small">Đang xử lý…</p>
     </section>
 
     <!-- 2. Cấu hình -->
@@ -240,6 +310,7 @@ function exportResults() {
         <div class="field"><label>Giây / câu trắc nghiệm</label><input v-model.number="week.mcq_seconds" type="number" min="5" /></div>
         <div class="field"><label>Giây / câu nhập chữ</label><input v-model.number="week.text_seconds" type="number" min="5" /></div>
       </div>
+      <label class="check"><input v-model="week.show_feedback" type="checkbox" /> Hiện đúng/sai và điểm ngay sau mỗi câu (tắt = chỉ công bố khi người chơi mở xong lượt cuối)</label>
       <p class="muted small">Tổng số ô = {{ totalCells }}. Nếu đã có người chơi, đừng đổi số ô và số lượt giữa chừng.</p>
       <div class="row">
         <div class="field"><label>Thông báo khi mở ô BONUS</label><input v-model="week.bonus_msg" /></div>
@@ -306,6 +377,13 @@ function exportResults() {
 <style scoped>
 .between { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.player { width: 100%; margin-top: 10px; }
+.presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 10px; margin: 6px 0 10px; }
+.swatch { background: var(--panel-2); border: 2px solid var(--line); border-radius: 12px; padding: 6px; cursor: pointer; color: var(--text); font: inherit; font-size: .78rem; display: flex; flex-direction: column; gap: 6px; align-items: center; }
+.swatch i { display: block; width: 100%; aspect-ratio: 9 / 12; border-radius: 8px; }
+.swatch.on { border-color: var(--accent); }
+.check { display: flex; align-items: flex-start; gap: 10px; color: var(--text); font-weight: 500; margin: 8px 0; cursor: pointer; }
+.check input { margin-top: 4px; }
 .bgrow { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
 .bgprev {
   width: 124px; aspect-ratio: 9 / 16; flex: none; border-radius: 12px; border: 1px dashed var(--line);

@@ -1,5 +1,6 @@
 import { reactive } from 'vue'
 import { rpc } from './lib/supabase'
+import { presetCss } from './lib/presets'
 
 // Tuần đang mở dùng chung cho các trang của người chơi
 export const state = reactive({ week: null, loaded: false, error: '' })
@@ -7,8 +8,10 @@ export const state = reactive({ week: null, loaded: false, error: '' })
 export function applyTheme(week) {
   const root = document.documentElement
   root.style.setProperty('--accent', week?.color || '#f97316')
-  if (week?.bg_image) {
-    root.style.setProperty('--bg-img', `url("${week.bg_image}")`)
+  // ảnh upload ưu tiên hơn kiểu nền có sẵn
+  const img = week?.bg_image ? `url("${week.bg_image}")` : presetCss(week?.bg_preset)
+  if (img) {
+    root.style.setProperty('--bg-img', img)
     root.classList.add('has-bg')
   } else {
     root.style.removeProperty('--bg-img')

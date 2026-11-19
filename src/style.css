@@ -31,7 +31,11 @@ body {
 html.has-bg:not(.no-bg) body::before {
   content: '';
   position: fixed; inset: 0; z-index: -2;
-  background: var(--bg-img) center / cover no-repeat;
+  background-color: #14110f;
+  background-image: var(--bg-img);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
 }
 html.has-bg:not(.no-bg) body::after {
   content: '';
@@ -61,9 +65,13 @@ img { max-width: 100%; }
   position: sticky; top: 0; z-index: 20;
 }
 .brand { font-weight: 800; text-decoration: none; color: var(--text); font-size: 1.05rem; white-space: nowrap; }
-.topbar nav { display: flex; gap: 6px; }
+.topbar nav { display: flex; gap: 6px; align-items: center; }
 .topbar nav a { text-decoration: none; color: var(--muted); font-weight: 600; padding: 8px 12px; border-radius: 10px; }
 .topbar nav a.router-link-exact-active { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+
+.snd { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; width: 40px; height: 40px; font-size: 1.15rem; cursor: pointer; line-height: 1; }
+.snd:hover { border-color: var(--accent); }
+.snd.off { opacity: .55; }
 
 .container {
   max-width: 640px; margin: 0 auto;
